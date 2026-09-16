@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>楕円体・測地系ズレ可視化シミュレーター</title>
+<!-- Tailwind CSS -->
+<script src="https://cdn.tailwindcss.com"></script>
+<!-- Leaflet CSS -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+<!-- Leaflet JS -->
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<!-- Proj4js -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/proj4js/2.9.0/proj4.js"></script>
+<style>
+body { font-family: 'Inter', sans-serif; }
+/* マップの高さを広げて余白を解消する */
+.map-container { height: 360px; min-height: 300px; }
+@media (min-width: 1024px) {
+  .map-container { height: 480px; }
+}
+</style>
+</head>
+<body class="bg-slate-50 text-slate-800 flex flex-col min-h-screen">
+<header class="bg-indigo-900 text-white shadow-md py-2 px-4 md:px-6">
+<div class="max-w-7xl mx-auto flex flex-col sm:flex-row justify-between items-center gap-1">
+<div>
+<h1 class="text-sm md:text-base font-bold flex items-center gap-2">
+🌍 測地系ズレ可視化シミュレーター
+</h1>
+<p class="text-xs text-indigo-200">地図上の任意の場所をクリックまたはタップして、測地系のズレを確認できます</p>
+</div>
+</div>
+</header>
+<section class="bg-white border-b border-slate-200 py-1.5 px-4 md:px-6 shadow-sm">
+<div class="max-w-7xl mx-auto flex items-center justify-between gap-4">
+<!-- Background Map Switcher -->
+<div class="flex items-center gap-2">
+<span class="text-xs font-semibold text-slate-600">背景地図:</span>
+<div class="flex rounded-lg overflow-hidden border border-slate-300 text-xs sm:text-sm">
+<button class="bg-indigo-600 text-white py-1 px-3 sm:px-4 font-medium layer-btn transition" data-layer="std">標準地図</button>
+<button class="bg-white hover:bg-slate-100 text-slate-700 py-1 px-3 sm:px-4 font-medium layer-btn border-l border-slate-300 transition" data-layer="pale">淡色地図</button>
+</div>
+</div>
+<div class="text-xs text-slate-500 hidden sm:block">
+💡 マップをクリックするとズレ（ベクトル）が自動計算されます
+</div>
+</div>
+</section>
+<main class="flex-1 max-w-7xl w-full mx-auto p-2 md:p-3 grid grid-cols-1 lg:grid-cols-2 gap-3 md:gap-4">
+<!-- GRS80 Pane -->
+<div class="flex flex-col bg-white rounded-xl shadow-md border border-slate-200 overflow-hidden">
+<div class="bg-slate-100 px-3 py-1.5 border-b border-slate-200 flex justify-between items-center">
+<span class="font-bold text-xs sm:text-sm text-slate-700 flex items-center gap-1.5">
+<span class="text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded border border-indigo-200">GRS80楕円体(世界測地系)</span>
+</span>
+</div>
+<div id="map-left" class="map-container w-full z-0"></div>
+<div class="p-2 bg-slate-50 border-t border-slate-200 text-xs text-slate-600 flex justify-between items-center">
+<span id="left-coords">座標: 読み込み中...</span>
+<span class="text-indigo-600 font-medium">基準位置</span>
+</div>
+</div>
+<!-- Bessel Pane -->
+<div class="flex flex-col bg-white rounded-xl shadow-md border border-slate-200 overflow-hidden">
+<div class="bg-slate-100 px-3 py-1.5 border-b border-slate-200 flex justify-between items-center">
+<span class="font-bold text-xs sm:text-sm text-slate-700 flex items-center gap-1.5">
+<span class="text-amber-600 bg-amber-50 px-2 py-0.5 rounded border border-amber-200">ベッセル楕円体(旧日本測地系・proj4変換)</span>
+</span>
+<span id="vector-info" class="text-xs font-semibold text-rose-600 bg-rose-50 px-2 py-0.5 rounded border border-rose-200">ズレ: 待機中</span>
+</div>
+<div id="map-right" class="map-container w-full z-0"></div>
+<div class="p-2 bg-slate-50 border-t border-slate-200 text-xs text-slate-600 flex justify-between items-center">
+<span id="right-coords">座標: 読み込み中...</span>
+<span class="text-amber-600 font-medium">ズレの可視化</span>
+</div>
+</div>
+</main>
+<footer class="bg-white border-t border-slate-200 py-2 px-6 text-center text-xs text-slate-500">
+<p>背景地図データ: 国土地理院 (地理院タイル: 標準地図、淡色地図)</p>
+</footer>
+<script>
+// Proj4 definitions for GRS80 (JGD2011/World Geodetic System) and Tokyo Datum (Bessel)
+proj4.defs("EPSG:6668", "+proj=longlat +ellps=GRS80 +no_defs");
+proj4.defs("EPSG:4301", "+proj=longlat +ellps=bessel +towgs84=-146.414,507.337,680.507,0,0,0,0 +no_defs");
+
+// 国土地理院タイル (標準・淡色)
+const gsiLayers = {
+  std: L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png', {
+    maxZoom: 18, minZoom: 5, attribution: '&copy; <a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank">国土地理院</a>'
+  }),
+  pale: L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png', {
+    maxZoom: 18, minZoom: 5, attribution: '&copy; <a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank">国土地理院</a>'
+  })
+};
+
+// 初期設定位置:東京駅付近
+const initialLat = 35.6811;
+const initialLng = 139.7671;
+
+// 左右のマップ初期化
+const mapLeft = L.map('map-left', { zoomControl: false }).setView([initialLat, initialLng], 14);
+const mapRight = L.map('map-right', { zoomControl: false }).setView([initialLat, initialLng], 14);
+mapLeft.addControl(L.control.zoom({ position: 'topright' }));
+mapRight.addControl(L.control.zoom({ position: 'topright' }));
+
+// デフォルトは標準地図
+let currentLayerType = 'std';
+let leftTileLayer = L.tileLayer(gsiLayers.std._url, { maxZoom: 18, attribution: gsiLayers.std.options.attribution }).addTo(mapLeft);
+let rightTileLayer = L.tileLayer(gsiLayers.std._url, { maxZoom: 18, attribution: gsiLayers.std.options.attribution }).addTo(mapRight);
+
+// マップの同期フラグ（無限ループ防止）
+let isSyncing = false;
+mapLeft.on('move', function() {
+  if (!isSyncing) {
+    isSyncing = true;
+    mapRight.setView(mapLeft.getCenter(), mapLeft.getZoom(), { animate: false });
+    isSyncing = false;
+  }
+});
+mapRight.on('move', function() {
+  if (!isSyncing) {
+    isSyncing = true;
+    mapLeft.setView(mapRight.getCenter(), mapRight.getZoom(), { animate: false });
+    isSyncing = false;
+  }
+});
+
+// マーカー・ライン管理
+let leftMarker = null;
+let rightMarkerRaw = null;
+let rightMarkerTrue = null;
+let connectionLine = null;
+
+// Proj4js を用いた正確な測地系変換によるオフセット計算
+function calculateOffsetCoords(lat, lng) {
+  // GRS80 (EPSG:6668) から ベッセル楕円体/旧日本測地系 (EPSG:4301) へ変換 [lng, lat]
+  const converted = proj4("EPSG:6668", "EPSG:4301", [lng, lat]);
+  return {
+    targetLat: converted[1],
+    targetLng: converted[0],
+    trueLat: lat,
+    trueLng: lng
+  };
+}
+
+// 2点間の距離（m）と方位計算
+function calculateDistanceAndBearing(lat1, lon1, lat2, lon2) {
+  const R = 6371e3;
+  const φ1 = lat1 * Math.PI / 180;
+  const φ2 = lat2 * Math.PI / 180;
+  const Δφ = (lat2 - lat1) * Math.PI / 180;
+  const Δλ = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) +
+            Math.cos(φ1) * Math.cos(φ2) *
+            Math.sin(Δλ/2) * Math.sin(Δλ/2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  const distance = R * c;
+  const y = Math.sin(Δλ) * Math.cos(φ2);
+  const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+  let brng = Math.atan2(y, x) * 180 / Math.PI;
+  brng = (brng + 360) % 360;
+  return { distance: Math.round(distance), bearing: Math.round(brng) };
+}
+
+// シミュレーション更新
+function updateSimulation(lat, lng) {
+  document.getElementById('left-coords').innerText = `緯度: ${lat.toFixed(5)}, 経度: ${lng.toFixed(5)}`;
+  
+  if (leftMarker) mapLeft.removeLayer(leftMarker);
+  if (rightMarkerRaw) mapRight.removeLayer(rightMarkerRaw);
+  if (rightMarkerTrue) mapRight.removeLayer(rightMarkerTrue);
+  if (connectionLine) mapRight.removeLayer(connectionLine);
+
+  // 基準マーカー
+  leftMarker = L.marker([lat, lng]).addTo(mapLeft)
+    .bindPopup(`<b>GRS80基準点</b><br>緯度: ${lat.toFixed(5)}<br>経度: ${lng.toFixed(5)}`).openPopup();
+
+  // 右側の位置計算 (Proj4js変換)
+  const coords = calculateOffsetCoords(lat, lng);
+
+  // ベッセル位置 (Proj4変換による正しい位置)
+  rightMarkerRaw = L.circleMarker([coords.targetLat, coords.targetLng], {
+    color: '#e11d48',
+    fillColor: '#f43f5e',
+    fillOpacity: 0.8,
+    radius: 8
+  }).addTo(mapRight).bindPopup(`<b>ベッセル (Proj4変換)の地点</b>`);
+
+  // 本来の位置
+  rightMarkerTrue = L.marker([coords.trueLat, coords.trueLng], {
+    opacity: 0.5
+  }).addTo(mapRight).bindPopup(`<b>本来の位置(GRS80)</b>`);
+
+  // ズレを繋ぐベクトル線
+  connectionLine = L.polyline([
+    [coords.trueLat, coords.trueLng],
+    [coords.targetLat, coords.targetLng]
+  ], {
+    color: '#e11d48',
+    weight: 3,
+    dashArray: '6, 6'
+  }).addTo(mapRight);
+
+  const res = calculateDistanceAndBearing(coords.trueLat, coords.trueLng, coords.targetLat, coords.targetLng);
+  document.getElementById('vector-info').innerText = `ズレの距離: 約${res.distance}m (${res.bearing}°)`;
+  document.getElementById('right-coords').innerText = `配置座標: ${coords.targetLat.toFixed(5)}, ${coords.targetLng.toFixed(5)}`;
+}
+
+// マップクリック時のイベント
+mapLeft.on('click', function(e) {
+  updateSimulation(e.latlng.lat, e.latlng.lng);
+});
+mapRight.on('click', function(e) {
+  // 右側マップをクリックした場合は、逆変換またはその位置に対応するGRS80側を逆算してシミュレーションする
+  const convertedBack = proj4("EPSG:4301", "EPSG:6668", [e.latlng.lng, e.latlng.lat]);
+  updateSimulation(convertedBack[1], convertedBack[0]);
+});
+
+// 背景地図の切り替え
+document.querySelectorAll('.layer-btn').forEach(btn => {
+  btn.addEventListener('click', (e) => {
+    const layerType = e.target.getAttribute('data-layer');
+    if (layerType === currentLayerType) return;
+    document.querySelectorAll('.layer-btn').forEach(b => {
+      b.classList.remove('bg-indigo-600', 'text-white');
+      b.classList.add('bg-white', 'text-slate-700');
+    });
+    e.target.classList.remove('bg-white', 'text-slate-700');
+    e.target.classList.add('bg-indigo-600', 'text-white');
+
+    mapLeft.removeLayer(leftTileLayer);
+    mapRight.removeLayer(rightTileLayer);
+
+    leftTileLayer = L.tileLayer(gsiLayers[layerType]._url, { maxZoom: 18, attribution: gsiLayers[layerType].options.attribution }).addTo(mapLeft);
+    rightTileLayer = L.tileLayer(gsiLayers[layerType]._url, { maxZoom: 18, attribution: gsiLayers[layerType].options.attribution }).addTo(mapRight);
+
+    currentLayerType = layerType;
+  });
+});
+
+// 初期ロード時 (東京駅にピンを設定)
+window.addEventListener('load', () => {
+  updateSimulation(initialLat, initialLng);
+  // Leafletの初期化ズレを防ぐためサイズを再計算
+  setTimeout(() => {
+    mapLeft.invalidateSize();
+    mapRight.invalidateSize();
+  }, 100);
+});
+</script>
+</body>
+</html>
